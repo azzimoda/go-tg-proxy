@@ -23,6 +23,17 @@ import (
 // called on every incoming update and is used to detect a stalled connection.
 type BotBuilderFunc = func(proxy string, onActivity func()) (*bot.Bot, error)
 
+// Option configures a BotService.
+type Option func(*BotService)
+
+// WithSendOnly puts the BotService into send-only mode: the bot is built and
+// connected through a proxy (with watchdog and automatic restart on network
+// errors), but no getUpdates polling is started. Useful for reporter bots that
+// only send messages.
+func WithSendOnly() Option {
+	return func(s *BotService) { s.sendOnly = true }
+}
+
 const (
 	proxyWatchdogPeriod = 30 * time.Second
 	proxyStallTimeout   = 3 * time.Minute
@@ -30,13 +41,17 @@ const (
 
 // NewBotService returns a BotService that builds bots via builder and rotates
 // through the proxies managed by proxyService.
-func NewBotService(builder BotBuilderFunc, proxyService *proxy.Service) *BotService {
-	return &BotService{
+func NewBotService(builder BotBuilderFunc, proxyService *proxy.Service, opts ...Option) *BotService {
+	s := &BotService{
 		builder:     builder,
 		proxy:       proxyService,
 		restartChan: make(chan struct{}),
 		restartSF:   &singleflight.Group{},
 	}
+	for _, o := range opts {
+		o(s)
+	}
+	return s
 }
 
 type BotService struct {
@@ -54,6 +69,7 @@ type BotService struct {
 	stopMu       sync.Mutex
 	stopped      bool
 	activity     atomic.Int64
+	sendOnly     bool
 }
 
 // Log returns the service logger carrying the bot username field.
@@ -218,6 +234,11 @@ func (s *BotService) startBot(ctx context.Context, botCtx context.Context) {
 		s.Bot = b
 		bot := s.Bot
 		s.stopMu.Unlock()
+
+		if s.sendOnly {
+			s.Log().Info().Msg("Send-only bot ready")
+			return
+		}
 
 		go s.runWatchdog(botCtx, bot)
 
