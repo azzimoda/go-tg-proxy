@@ -321,35 +321,72 @@ type proxyCandidate struct {
 }
 
 // findBestAsync concurrently checks candidates and returns up to n best ones
-// ordered by latency.
+// ordered by latency. The scan stops dispatching new checks as soon as n
+// working candidates have been found; in-flight checks are cancelled via ctx,
+// so unreachable proxies do not hold the result hostage.
 func findBestAsync(items []string, maxConcurrent, n int, check func(context.Context, string) (time.Duration, bool)) []proxyCandidate {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	if n <= 0 {
+		n = len(items)
+	}
+	if maxConcurrent <= 0 {
+		maxConcurrent = 1
+	}
+
 	semaphore := make(chan struct{}, maxConcurrent)
 	var mu sync.Mutex
-	results := make([]proxyCandidate, 0)
+	results := make([]proxyCandidate, 0, n)
 	var wg sync.WaitGroup
 
-	for _, item := range items {
-		wg.Add(1)
-		semaphore <- struct{}{}
+	const progressStep = 500
+	checked := 0
 
+	for _, item := range items {
+		select {
+		case semaphore <- struct{}{}:
+		case <-ctx.Done():
+			break
+		}
+		if ctx.Err() != nil {
+			break // enough working candidates already collected
+		}
+		wg.Add(1)
 		go func(item string) {
 			defer wg.Done()
 			defer func() { <-semaphore }()
 
-			if lat, ok := check(ctx, item); ok {
-				mu.Lock()
+			if ctx.Err() != nil {
+				return
+			}
+			lat, ok := check(ctx, item)
+			mu.Lock()
+			checked++
+			if ok {
 				results = append(results, proxyCandidate{proxy: item, latency: lat})
-				mu.Unlock()
+			}
+			count := checked
+			found := len(results)
+			mu.Unlock()
+
+			if ok {
+				log.Debug().Str("proxy", item).Dur("latency", lat).Msg("Candidate proxy found")
+			} else {
+				log.Trace().Str("proxy", item).Msg("Candidate proxy rejected")
+			}
+			if count%progressStep == 0 {
+				log.Debug().Int("checked", count).Int("total", len(items)).Int("found", found).Msg("Proxy scan in progress")
+			}
+			if found >= n {
+				cancel()
 			}
 		}(item)
 	}
 	wg.Wait()
 
 	sort.Slice(results, func(i, j int) bool { return results[i].latency < results[j].latency })
-	if n > 0 && len(results) > n {
+	if len(results) > n {
 		results = results[:n]
 	}
 	return results

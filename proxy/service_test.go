@@ -3,6 +3,7 @@ package proxy
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -130,6 +131,39 @@ func TestFirstAvailableNoProxies(t *testing.T) {
 	_, err := s.FirstAvailable(context.Background())
 	if !errors.Is(err, ErrNoAvailableProxy) {
 		t.Fatalf("FirstAvailable() error = %v, want ErrNoAvailableProxy", err)
+	}
+}
+
+func TestFindBestAsyncStopsAfterNeedFound(t *testing.T) {
+	working := []string{"10.0.0.1000:1080", "10.0.0.1001:1081"}
+	dead := make([]string, 0, 1000)
+	for i := 0; i < 1000; i++ {
+		dead = append(dead, fmt.Sprintf("10.0.0.%d:1080", i))
+	}
+	candidates := append(append(working, dead...), "10.0.0.2000:1080")
+
+	var mu sync.Mutex
+	checked := 0
+	check := func(_ context.Context, p string) (time.Duration, bool) {
+		for _, w := range working {
+			if p == w {
+				return time.Millisecond, true
+			}
+		}
+		mu.Lock()
+		checked++
+		mu.Unlock()
+		return 0, false
+	}
+
+	got := findBestAsync(candidates, 4, 2, check)
+	if len(got) != 2 {
+		t.Fatalf("findBestAsync() returned %d candidates, want 2", len(got))
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if checked > 32 {
+		t.Fatalf("findBestAsync() checked %d dead candidates, want early exit after n found", checked)
 	}
 }
 
