@@ -371,12 +371,12 @@ func findBestAsync(items []string, maxConcurrent, n int, check func(context.Cont
 			mu.Unlock()
 
 			if ok {
-				log.Debug().Str("proxy", item).Dur("latency", lat).Msg("Candidate proxy found")
+				log.Trace().Str("proxy", item).Dur("latency", lat).Msg("Candidate proxy found")
 			} else {
 				log.Trace().Str("proxy", item).Msg("Candidate proxy rejected")
 			}
 			if count%progressStep == 0 {
-				log.Debug().Int("checked", count).Int("total", len(items)).Int("found", found).Msg("Proxy scan in progress")
+				log.Debug().Int("checked", count).Int("total", len(items)).Int("found", found).Msg("Proxy scan in progress...")
 			}
 			if found >= n {
 				cancel()
