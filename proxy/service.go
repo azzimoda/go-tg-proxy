@@ -222,7 +222,7 @@ func (s *Service) revalidatePool(ctx context.Context) {
 			}
 		}
 		if len(candidates) > 0 {
-			for _, c := range findBestAsync(candidates, s.finderWorkers, need,
+			for _, c := range findBestAsync(candidates, s.finderWorkers, need, 1,
 				func(ctx context.Context, p string) (time.Duration, bool) {
 					lat, err := s.checker.CheckLatency(ctx, p)
 					return lat, err == nil
@@ -324,7 +324,7 @@ type proxyCandidate struct {
 // ordered by latency. The scan stops dispatching new checks as soon as n
 // working candidates have been found; in-flight checks are cancelled via ctx,
 // so unreachable proxies do not hold the result hostage.
-func findBestAsync(items []string, maxConcurrent, n int, check func(context.Context, string) (time.Duration, bool)) []proxyCandidate {
+func findBestAsync(items []string, maxConcurrent, n int, priority int, check func(context.Context, string) (time.Duration, bool)) []proxyCandidate {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -342,47 +342,60 @@ func findBestAsync(items []string, maxConcurrent, n int, check func(context.Cont
 
 	const progressStep = 500
 	checked := 0
+	found := 0
+	priorityStarted := 0
 
-	for _, item := range items {
-		select {
-		case semaphore <- struct{}{}:
-		case <-ctx.Done():
+	for index, item := range items {
+		// If we have enough results and all priority items have been started, we can stop.
+		if priorityStarted >= priority && found >= n {
 			break
 		}
 		if ctx.Err() != nil {
-			break // enough working candidates already collected
+			break
 		}
-		wg.Add(1)
-		go func(item string) {
-			defer wg.Done()
-			defer func() { <-semaphore }()
+		select {
+		case semaphore <- struct{}{}:
+			// Got semaphore
+			if index < priority {
+				priorityStarted++
+			}
+			wg.Add(1)
+			go func(item string) {
+				defer wg.Done()
+				defer func() { <-semaphore }()
 
-			if ctx.Err() != nil {
-				return
-			}
-			lat, ok := check(ctx, item)
-			mu.Lock()
-			checked++
-			if ok {
-				results = append(results, proxyCandidate{proxy: item, latency: lat})
-			}
-			count := checked
-			found := len(results)
-			mu.Unlock()
+				if ctx.Err() != nil {
+					return
+				}
+				lat, ok := check(ctx, item)
+				mu.Lock()
+				if ok {
+					results = append(results, proxyCandidate{proxy: item, latency: lat})
+				}
+				count := checked
+				found := len(results)
+				mu.Unlock()
 
-			if ok {
-				log.Trace().Str("proxy", item).Dur("latency", lat).Msg("Candidate proxy found")
-			} else {
-				log.Trace().Str("proxy", item).Msg("Candidate proxy rejected")
-			}
-			if count%progressStep == 0 {
-				log.Debug().Int("checked", count).Int("total", len(items)).Int("found", found).Msg("Proxy scan in progress...")
-			}
-			if found >= n {
-				cancel()
-			}
-		}(item)
+				if ok {
+					log.Trace().Str("proxy", item).Dur("latency", lat).Msg("Candidate proxy found")
+				} else {
+					log.Trace().Str("proxy", item).Msg("Candidate proxy rejected")
+				}
+				if count%progressStep == 0 {
+					log.Debug().Int("checked", count).Int("total", len(items)).Int("found", found).Msg("Proxy scan in progress...")
+				}
+				if found >= n {
+					// Trigger cancellation? We'll rely on the loop condition at next iteration.
+					// To break early, we can cancel the context here, but we must ensure we don't cancel
+					// before priority items are processed. We'll just set found and let the loop's
+					// condition check at the top.
+				}
+			}(item)
+		case <-ctx.Done():
+			break
+		}
 	}
+
 	wg.Wait()
 
 	sort.Slice(results, func(i, j int) bool { return results[i].latency < results[j].latency })

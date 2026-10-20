@@ -137,7 +137,7 @@ func (s *BotService) Start(ctx context.Context) {
 			s.stopMu.Unlock()
 
 			cancel()
-			s.startBot(ctx, botCtx)
+			go s.startBot(ctx, botCtx)
 		}
 	}
 }
