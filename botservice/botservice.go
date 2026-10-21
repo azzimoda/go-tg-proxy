@@ -268,12 +268,6 @@ func (s *BotService) runWatchdog(botCtx context.Context, b *bot.Bot) {
 			s.Restart()
 			return
 		}
-
-		if s.stalled(time.Now()) {
-			s.Log().Warn().Msg("Watchdog: no updates for a long time, restarting with a new proxy...")
-			s.Restart()
-			return
-		}
 	}
 }
 
