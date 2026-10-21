@@ -156,7 +156,7 @@ func TestFindBestAsyncStopsAfterNeedFound(t *testing.T) {
 		return 0, false
 	}
 
-	got := findBestAsync(candidates, 4, 2, check)
+	got := findBestAsync(candidates, 4, 2, 0, check)
 	if len(got) != 2 {
 		t.Fatalf("findBestAsync() returned %d candidates, want 2", len(got))
 	}
@@ -164,6 +164,33 @@ func TestFindBestAsyncStopsAfterNeedFound(t *testing.T) {
 	defer mu.Unlock()
 	if checked > 32 {
 		t.Fatalf("findBestAsync() checked %d dead candidates, want early exit after n found", checked)
+	}
+}
+
+func TestFindBestAsyncAlwaysChecksPriorityCandidate(t *testing.T) {
+	var mu sync.Mutex
+	checked := map[string]bool{}
+	check := func(_ context.Context, p string) (time.Duration, bool) {
+		mu.Lock()
+		checked[p] = true
+		mu.Unlock()
+		if p == "priority" {
+			// Slow, so the fast candidates reach n first: the scan must still
+			// wait for the priority candidate instead of cancelling it.
+			time.Sleep(20 * time.Millisecond)
+		}
+		return time.Millisecond, true
+	}
+
+	got := findBestAsync([]string{"priority", "a", "b", "c"}, 4, 1, 1, check)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if !checked["priority"] {
+		t.Fatal("findBestAsync() skipped the priority candidate")
+	}
+	if len(got) != 1 {
+		t.Fatalf("findBestAsync() returned %d candidates, want 1", len(got))
 	}
 }
 

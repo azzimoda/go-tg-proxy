@@ -322,8 +322,11 @@ type proxyCandidate struct {
 
 // findBestAsync concurrently checks candidates and returns up to n best ones
 // ordered by latency. The scan stops dispatching new checks as soon as n
-// working candidates have been found; in-flight checks are cancelled via ctx,
-// so unreachable proxies do not hold the result hostage.
+// working candidates have been found, but the first priority candidates are
+// always checked even when that takes longer: the pool uses this to make sure
+// the preferred (local) proxy is never skipped in favour of a fast free one.
+// In-flight checks are cancelled once the priority candidates are done, so
+// unreachable proxies do not hold the result hostage.
 func findBestAsync(items []string, maxConcurrent, n int, priority int, check func(context.Context, string) (time.Duration, bool)) []proxyCandidate {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -334,6 +337,12 @@ func findBestAsync(items []string, maxConcurrent, n int, priority int, check fun
 	if maxConcurrent <= 0 {
 		maxConcurrent = 1
 	}
+	if priority < 0 {
+		priority = 0
+	}
+	if priority > len(items) {
+		priority = len(items)
+	}
 
 	semaphore := make(chan struct{}, maxConcurrent)
 	var mu sync.Mutex
@@ -343,57 +352,73 @@ func findBestAsync(items []string, maxConcurrent, n int, priority int, check fun
 	const progressStep = 500
 	checked := 0
 	found := 0
-	priorityStarted := 0
+	priorityDone := 0
 
+	// done reports whether the scan has everything it needs: n working
+	// candidates and a verdict for every priority candidate.
+	done := func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return priorityDone >= priority && found >= n
+	}
+
+dispatch:
 	for index, item := range items {
-		// If we have enough results and all priority items have been started, we can stop.
-		if priorityStarted >= priority && found >= n {
-			break
-		}
-		if ctx.Err() != nil {
+		if done() {
 			break
 		}
 		select {
 		case semaphore <- struct{}{}:
-			// Got semaphore
-			if index < priority {
-				priorityStarted++
-			}
-			wg.Add(1)
-			go func(item string) {
-				defer wg.Done()
-				defer func() { <-semaphore }()
-
-				if ctx.Err() != nil {
-					return
-				}
-				lat, ok := check(ctx, item)
-				mu.Lock()
-				if ok {
-					results = append(results, proxyCandidate{proxy: item, latency: lat})
-				}
-				count := checked
-				found := len(results)
-				mu.Unlock()
-
-				if ok {
-					log.Trace().Str("proxy", item).Dur("latency", lat).Msg("Candidate proxy found")
-				} else {
-					log.Trace().Str("proxy", item).Msg("Candidate proxy rejected")
-				}
-				if count%progressStep == 0 {
-					log.Debug().Int("checked", count).Int("total", len(items)).Int("found", found).Msg("Proxy scan in progress...")
-				}
-				if found >= n {
-					// Trigger cancellation? We'll rely on the loop condition at next iteration.
-					// To break early, we can cancel the context here, but we must ensure we don't cancel
-					// before priority items are processed. We'll just set found and let the loop's
-					// condition check at the top.
-				}
-			}(item)
 		case <-ctx.Done():
+			break dispatch
+		}
+		if done() {
+			// Enough results arrived while waiting for a free worker.
+			<-semaphore
 			break
 		}
+
+		isPriority := index < priority
+		wg.Add(1)
+		go func(item string, isPriority bool) {
+			defer wg.Done()
+			defer func() { <-semaphore }()
+
+			if ctx.Err() != nil {
+				if isPriority {
+					mu.Lock()
+					priorityDone++
+					mu.Unlock()
+				}
+				return
+			}
+
+			lat, ok := check(ctx, item)
+
+			mu.Lock()
+			checked++
+			if ok {
+				results = append(results, proxyCandidate{proxy: item, latency: lat})
+				found++
+			}
+			if isPriority {
+				priorityDone++
+			}
+			count, foundNow, stop := checked, found, priorityDone >= priority && found >= n
+			mu.Unlock()
+
+			if ok {
+				log.Trace().Str("proxy", item).Dur("latency", lat).Msg("Candidate proxy found")
+			} else {
+				log.Trace().Str("proxy", item).Msg("Candidate proxy rejected")
+			}
+			if count%progressStep == 0 {
+				log.Debug().Int("checked", count).Int("total", len(items)).Int("found", foundNow).Msg("Proxy scan in progress")
+			}
+			if stop {
+				cancel()
+			}
+		}(item, isPriority)
 	}
 
 	wg.Wait()
