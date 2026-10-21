@@ -77,22 +77,6 @@ func TestHandleAPIErrorSkipsRestartForTelegramErrors(t *testing.T) {
 	}
 }
 
-func TestBotServiceStalled(t *testing.T) {
-	s := NewBotService(nil, nil)
-	if !s.stalled(time.Now()) {
-		t.Fatal("fresh bot with no activity should be considered stalled")
-	}
-
-	s.Touch()
-	if s.stalled(time.Now()) {
-		t.Fatal("bot with recent activity should not be stalled")
-	}
-
-	if !s.stalled(time.Now().Add(proxyStallTimeout + time.Minute)) {
-		t.Fatal("bot without activity for longer than proxyStallTimeout should be stalled")
-	}
-}
-
 func TestBotServiceStopWithoutStart(t *testing.T) {
 	s := NewBotService(nil, nil)
 	s.Stop()

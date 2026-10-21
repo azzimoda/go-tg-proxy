@@ -14,7 +14,7 @@ must. Extracted from [raspishika-gx](https://github.com/azzimoda/raspishika-gx).
 |---|---|
 | `proxyutil` | `NewHTTPProxyClient` — an `*http.Client` dialing through a SOCKS5 proxy (context-aware). |
 | `proxy` | `Source` interface + `ProxiflySource` (default provider), in-memory `Repository`, latency `Checker` + `TelegramChecker`, and a `Service` that keeps a warm pool of verified proxies. |
-| `botservice` | `BotService` — starts/stops/restarts a `*bot.Bot`, picking the best available proxy, with a watchdog that rotates the proxy when Telegram stops delivering updates. |
+| `botservice` | `BotService` — starts/stops/restarts a `*bot.Bot`, picking the best available proxy, with a watchdog that rotates the proxy when Telegram stops answering. |
 
 ## Quick start
 
@@ -86,9 +86,10 @@ proxy is usable when the API replies "not found" (i.e. the request actually
 reached Telegram). The probe measures round-trip latency, so the pool always
 prefers the fastest live proxy.
 
-`BotService` additionally watches for a stalled connection: if Telegram sends
-no updates for over 3 minutes, or the API becomes unreachable, it restarts the
-bot on the next best proxy.
+`BotService` runs a watchdog that probes `getMe` every 30 seconds: when the API
+becomes unreachable it restarts the bot on the next best proxy. A quiet period
+with no incoming updates is *not* treated as a failure — many bots simply have
+no traffic at night, and restarting on inactivity kept rotating a healthy proxy.
 
 ## License
 

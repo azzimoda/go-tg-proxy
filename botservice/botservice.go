@@ -1,7 +1,7 @@
 // Package botservice manages the lifecycle of a go-telegram/bot instance that
 // runs over a SOCKS5 proxy: it builds the bot through the given builder, keeps
 // the connection warm with a watchdog and restarts the bot with a new proxy
-// when the current one becomes unreachable or stops delivering updates.
+// when the current one becomes unreachable.
 package botservice
 
 import (
@@ -20,7 +20,7 @@ import (
 )
 
 // BotBuilderFunc builds a *bot.Bot for the given proxy address. onActivity is
-// called on every incoming update and is used to detect a stalled connection.
+// called on every incoming update, so the caller can record the last activity.
 type BotBuilderFunc = func(proxy string, onActivity func()) (*bot.Bot, error)
 
 // Option configures a BotService.
@@ -34,10 +34,7 @@ func WithSendOnly() Option {
 	return func(s *BotService) { s.sendOnly = true }
 }
 
-const (
-	proxyWatchdogPeriod = 30 * time.Second
-	proxyStallTimeout   = 3 * time.Minute
-)
+const proxyWatchdogPeriod = 30 * time.Second
 
 // NewBotService returns a BotService that builds bots via builder and rotates
 // through the proxies managed by proxyService.
@@ -83,11 +80,6 @@ func (s *BotService) Username() string { return s.username }
 // Touch records recent bot activity (an incoming update).
 func (s *BotService) Touch() {
 	s.activity.Store(time.Now().UnixNano())
-}
-
-// stalled reports whether no activity was seen for longer than proxyStallTimeout.
-func (s *BotService) stalled(now time.Time) bool {
-	return now.Sub(time.Unix(0, s.activity.Load())) > proxyStallTimeout
 }
 
 // HealthCheck returns nil when the running bot answers the Telegram API.
@@ -249,7 +241,7 @@ func (s *BotService) startBot(ctx context.Context, botCtx context.Context) {
 }
 
 // runWatchdog periodically probes Telegram and restarts the bot with a new
-// proxy if the current one stopped delivering updates or became unreachable.
+// proxy if the current one became unreachable.
 func (s *BotService) runWatchdog(botCtx context.Context, b *bot.Bot) {
 	ticker := time.NewTicker(proxyWatchdogPeriod)
 	defer ticker.Stop()
